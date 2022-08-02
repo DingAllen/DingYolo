@@ -1,3 +1,5 @@
+import random
+
 import numpy as np
 
 
@@ -27,8 +29,4 @@ def normalize_img(image):
 
 
 if __name__ == '__main__':
-    from config import HP
-
-    h, w = HP.input_size
-    print(h)
-    print(w)
+    print(random.randint(1,10))

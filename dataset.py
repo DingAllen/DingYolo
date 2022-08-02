@@ -1,3 +1,5 @@
+import random
+
 import torch
 from torch.utils.data.dataset import Dataset
 import numpy as np
@@ -27,6 +29,9 @@ class YoloDataset(Dataset):
 
         if self.isTraining and HP.mosaic and self.rand() < HP.mosaic_prob:
             img, box = self.parse_metadata_with_mosaic(index)
+            if HP.mixup and self.rand() < HP.mixup_prob:
+                img_2, box_2 = self.parse_metadata(random.randint(0, self.length - 1), random=self.isTraining)
+                img, box = self.mixup_data(img, box, img_2, box_2)
         else:
             img, box = self.parse_metadata(index, random=self.isTraining)
 
@@ -343,6 +348,16 @@ class YoloDataset(Dataset):
 
         return img_data, box
 
+    def mixup_data(self, image_1, box_1, image_2, box_2):
+        new_image = np.array(image_1, np.float32) * 0.5 + np.array(image_2, np.float32) * 0.5
+        if len(box_1) == 0:
+            new_boxes = box_2
+        elif len(box_2) == 0:
+            new_boxes = box_1
+        else:
+            new_boxes = np.concatenate([box_1, box_2], axis=0)
+        return new_image, new_boxes
+
 
 def yolo_dataset_collate(batch):
     images = []
@@ -370,6 +385,22 @@ if __name__ == '__main__':
         print(box)
         break
 
+    # 测试mixup
+    # img, box = dataset.parse_metadata_with_mosaic(11)
+    # img_2, box_2 = dataset.parse_metadata(random.randint(1, 10))
+    # img, box = dataset.mixup_data(img, box, img_2, box_2)
+    # img_data = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    # img_data = np.array(img_data, np.uint8)
+    #
+    # for b in box:
+    #     print(b)
+    #     cv2.rectangle(img_data, (b[0], b[1]), (b[2], b[3]), color=(0, 0, 255), thickness=1)
+    #
+    # cv2.namedWindow('123')
+    # cv2.imshow('123', img_data)
+    # cv2.waitKey(0)
+
+    # 测试mosaic
     # for i in range(10):
     #     img_data, box = dataset.parse_metadata_with_mosaic(i)
     #     print(img_data.shape)
