@@ -1,9 +1,10 @@
+import torch
 from torch.utils.data.dataset import Dataset
 import numpy as np
 from PIL import Image
 import cv2
 from random import sample, shuffle
-from utils import load_meta, cvtColor
+from utils import load_meta, cvtColor, normalize_img
 from config import HP
 
 
@@ -28,7 +29,26 @@ class YoloDataset(Dataset):
             img, box = self.parse_metadata_with_mosaic(index)
         else:
             img, box = self.parse_metadata(index, random=self.isTraining)
-        pass
+
+        img_data = np.transpose(normalize_img(np.array(img, dtype=np.float32)), (2, 0, 1))
+        box = np.array(box, dtype=np.float32)
+
+        h, w = HP.input_shape
+        box_length = len(box)
+        labels_out = np.zeros((box_length, 6))
+        if box_length > 0:
+            box[:, [0, 2]] = box[:, [0, 2]] / w
+            box[:, [1, 3]] = box[:, [1, 3]] / h
+
+            # 将box中每项的0、1位转化为中心归一化坐标，2、3位转化为归一化后的宽高
+            box[:, 2:4] = box[:, 2:4] - box[:, 0:2]
+            box[:, 0:2] = box[:, 0:2] + box[:, 2:4] / 2
+
+            # 这里出于box长度不一致的考虑，设计了一个labels_out，后处理中将在第0位填入其在当前batch中的位置信息
+            labels_out[:, 1] = box[:, -1]
+            labels_out[:, 2:] = box[:, :4]
+
+        return img_data, labels_out
 
     def rand(self, bottom=0., top=1.):
         '''
@@ -205,6 +225,7 @@ class YoloDataset(Dataset):
 
     def parse_metadata_with_mosaic(self, index, jitter=0.3, hue=0.1, sat=0.7, val=0.4):
         '''
+        对单位数据进行处理，并进行了mosaic操作
 
         :param index: 当前操作的数据的下标
         :param jitter: 随机缩放的最大比例
@@ -323,19 +344,41 @@ class YoloDataset(Dataset):
         return img_data, box
 
 
+def yolo_dataset_collate(batch):
+    images = []
+    bboxes = []
+    for i, (img, box) in enumerate(batch):
+        images.append(img)
+        box[:, 0] = i
+        bboxes.append(box)
+
+    images = torch.from_numpy(np.array(images)).type(torch.FloatTensor)
+    bboxes = torch.from_numpy(np.concatenate(bboxes, 0)).type(torch.FloatTensor)
+    return images, bboxes
+
+
 if __name__ == '__main__':
+    from torch.utils.data import DataLoader
+
     dataset = YoloDataset('testset.txt')
 
-    for i in range(10):
-        img_data, box = dataset.parse_metadata_with_mosaic(i)
-        print(img_data.shape)
-        img_data = cv2.cvtColor(img_data, cv2.COLOR_RGB2BGR)
+    data_loader = DataLoader(dataset, batch_size=2, collate_fn=yolo_dataset_collate)
 
-        for b in box:
-            print(b)
-            cv2.rectangle(img_data, (b[0], b[1]), (b[2], b[3]), color=(0, 0, 255), thickness=1)
+    for batch in data_loader:
+        img_data, box = batch
+        print(img_data.size())
+        print(box)
+        break
 
-        cv2.namedWindow('123')
-        cv2.imshow('123', img_data)
-        cv2.waitKey(0)
-
+    # for i in range(10):
+    #     img_data, box = dataset.parse_metadata_with_mosaic(i)
+    #     print(img_data.shape)
+    #     img_data = cv2.cvtColor(img_data, cv2.COLOR_RGB2BGR)
+    #
+    #     for b in box:
+    #         print(b)
+    #         cv2.rectangle(img_data, (b[0], b[1]), (b[2], b[3]), color=(0, 0, 255), thickness=1)
+    #
+    #     cv2.namedWindow('123')
+    #     cv2.imshow('123', img_data)
+    #     cv2.waitKey(0)

@@ -21,6 +21,11 @@ def cvtColor(image):
         return image
 
 
+def normalize_img(image):
+    image /= 255.0
+    return image
+
+
 if __name__ == '__main__':
     from config import HP
 

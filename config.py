@@ -1,7 +1,7 @@
 # 配置项目所需参数
 class HyperParameters:
     # 路径配置
-    a = 1
+
 
     # 数据配置
     mosaic = True
@@ -14,6 +14,7 @@ class HyperParameters:
     input_shape = (640, 640) # (height, width)
 
     # 训练配置
+    device = 'cpu'
 
 
 
