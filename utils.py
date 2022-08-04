@@ -29,4 +29,4 @@ def normalize_img(image):
 
 
 if __name__ == '__main__':
-    print(random.randint(1,10))
+    x = 1
