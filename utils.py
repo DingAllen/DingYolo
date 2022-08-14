@@ -1,6 +1,7 @@
 import random
 
 import numpy as np
+import torch
 
 
 def load_meta(meta_path):
@@ -29,4 +30,7 @@ def normalize_img(image):
 
 
 if __name__ == '__main__':
-    x = 1
+    t = torch.randn((2, 3))
+    print(t)
+    print(torch.sigmoid(t))
+    print(t.sigmoid())
