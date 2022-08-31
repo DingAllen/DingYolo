@@ -1,7 +1,9 @@
 # 配置项目所需参数
 class HyperParameters:
     # 路径配置
-    anchor_path = 'data/yolo_anchors.txt'
+    anchors_path = 'yolo_anchors.txt'
+    metadata_train_path = 'testset.txt'
+    metadata_eval_path = 'testset.txt'
 
     # 数据配置
     mosaic = True
@@ -17,6 +19,8 @@ class HyperParameters:
 
     # 训练配置
     device = 'cpu'
-
+    seed = 19990811
+    batch_size = 8
+    epochs = 50
 
 HP = HyperParameters()

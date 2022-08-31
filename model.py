@@ -2,6 +2,8 @@ import torch
 from torch import nn
 from config import HP
 from torch.nn import functional as F
+import math
+import numpy as np
 
 class CBS(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride):
@@ -220,15 +222,28 @@ class YoloNet(nn.Module):
         x2 = self.head2(x2)
         x3 = self.head3(x3)
 
-        return x1, x2, x3
+        return [x1, x2, x3]
+
+
+def smooth_BCE(eps=0.1):  # https://github.com/ultralytics/yolov3/issues/238#issuecomment-598028441
+    # return positive, negative label smoothing BCE targets
+    return 1.0 - 0.5 * eps, 0.5 * eps
 
 
 class YoloLoss(nn.Module):
     def __init__(self, anchors):
         super(YoloLoss, self).__init__()
         self.anchors = [anchors[mask] for mask in HP.anchor_mask]
+        self.balance = [0.4, 1.0, 4]
         self.stride = [32, 16, 8]
+
+        self.box_ratio = 0.05
+        self.obj_ratio = 1 * (HP.input_shape[0] * HP.input_shape[1]) / (640 ** 2)
+        self.cls_ratio = 0.5 * (HP.num_classes / 80)
         self.threshold = 4
+
+        self.cp, self.cn = smooth_BCE(eps=0)
+        self.BCEcls, self.BCEobj, self.gr = nn.BCEWithLogitsLoss(), nn.BCEWithLogitsLoss(), 1
 
     def __call__(self, predictions, targets, imgs):
         # 将预测结果变换成方便编程的模样
@@ -249,7 +264,116 @@ class YoloLoss(nn.Module):
         feature_map_sizes = [torch.tensor(prediction.shape, device=HP.device)[[3, 2, 3, 2]].type_as(prediction) for
                              prediction in predictions]
 
-        pass
+        # 对三个特征层依次进行loss的计算
+        for i, prediction in enumerate(predictions):
+            # -------------------------------------------#
+            #   image, anchor, gridy, gridx
+            # -------------------------------------------#
+            b, a, gj, gi = bs[i], as_[i], gjs[i], gis[i]  # 第几张图片，第几个真实框，y，x
+            tobj = torch.zeros_like(prediction[..., 0], device=HP.device)  # target obj
+
+            # -------------------------------------------#
+            #   获得目标数量，如果目标大于0
+            #   则开始计算种类损失和回归损失
+            # -------------------------------------------#
+            n = b.shape[0]
+            if n:
+                prediction_pos = prediction[b, a, gj, gi]  # prediction subset corresponding to targets
+
+                # -------------------------------------------#
+                #   计算匹配上的正样本的回归损失
+                # -------------------------------------------#
+                # -------------------------------------------#
+                #   grid 获得正样本的x、y轴坐标
+                # -------------------------------------------#
+                grid = torch.stack([gi, gj], dim=1)
+                # -------------------------------------------#
+                #   进行解码，获得预测结果
+                # -------------------------------------------#
+                xy = prediction_pos[:, :2].sigmoid() * 2. - 0.5
+                wh = (prediction_pos[:, 2:4].sigmoid() * 2) ** 2 * anchors[i]
+                box = torch.cat((xy, wh), 1)
+                # -------------------------------------------#
+                #   对真实框进行处理，映射到特征层上
+                # -------------------------------------------#
+                selected_tbox = targets[i][:, 2:6] * feature_map_sizes[i]
+                selected_tbox[:, :2] -= grid.type_as(prediction)
+                # -------------------------------------------#
+                #   计算预测框和真实框的回归损失
+                # -------------------------------------------#
+                iou = self.bbox_iou(box.T, selected_tbox, x1y1x2y2=False, CIoU=True)
+                box_loss += (1.0 - iou).mean()
+                # -------------------------------------------#
+                #   根据预测结果的iou获得置信度损失的gt
+                # -------------------------------------------#
+                tobj[b, a, gj, gi] = (1.0 - self.gr) + self.gr * iou.detach().clamp(0).type(tobj.dtype)  # iou ratio
+
+                # -------------------------------------------#
+                #   计算匹配上的正样本的分类损失
+                # -------------------------------------------#
+                selected_tcls = targets[i][:, 1].long()
+                t = torch.full_like(prediction_pos[:, 5:], self.cn, device=HP.device)  # targets
+                t[range(n), selected_tcls] = self.cp
+                cls_loss += self.BCEcls(prediction_pos[:, 5:], t)  # BCE
+
+            # -------------------------------------------#
+            #   计算目标是否存在的置信度损失
+            #   并且乘上每个特征层的比例
+            # -------------------------------------------#
+            obj_loss += self.BCEobj(prediction[..., 4], tobj) * self.balance[i]  # obj loss
+
+            # -------------------------------------------#
+            #   将各个部分的损失乘上比例
+            #   全加起来后，乘上batch_size
+            # -------------------------------------------#
+        box_loss *= self.box_ratio
+        obj_loss *= self.obj_ratio
+        cls_loss *= self.cls_ratio
+        bs = tobj.shape[0]
+
+        loss = box_loss + obj_loss + cls_loss
+        return loss
+
+    def bbox_iou(self, box1, box2, x1y1x2y2=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7):
+        box2 = box2.T
+
+        if x1y1x2y2:
+            b1_x1, b1_y1, b1_x2, b1_y2 = box1[0], box1[1], box1[2], box1[3]
+            b2_x1, b2_y1, b2_x2, b2_y2 = box2[0], box2[1], box2[2], box2[3]
+        else:
+            b1_x1, b1_x2 = box1[0] - box1[2] / 2, box1[0] + box1[2] / 2
+            b1_y1, b1_y2 = box1[1] - box1[3] / 2, box1[1] + box1[3] / 2
+            b2_x1, b2_x2 = box2[0] - box2[2] / 2, box2[0] + box2[2] / 2
+            b2_y1, b2_y2 = box2[1] - box2[3] / 2, box2[1] + box2[3] / 2
+
+        inter = (torch.min(b1_x2, b2_x2) - torch.max(b1_x1, b2_x1)).clamp(0) * \
+                (torch.min(b1_y2, b2_y2) - torch.max(b1_y1, b2_y1)).clamp(0)
+
+        w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + eps
+        w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + eps
+        union = w1 * h1 + w2 * h2 - inter + eps
+
+        iou = inter / union
+
+        if GIoU or DIoU or CIoU:
+            cw = torch.max(b1_x2, b2_x2) - torch.min(b1_x1, b2_x1)  # convex (smallest enclosing box) width
+            ch = torch.max(b1_y2, b2_y2) - torch.min(b1_y1, b2_y1)  # convex height
+            if CIoU or DIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
+                c2 = cw ** 2 + ch ** 2 + eps  # convex diagonal squared
+                rho2 = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 +
+                        (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4  # center distance squared
+                if DIoU:
+                    return iou - rho2 / c2  # DIoU
+                elif CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
+                    v = (4 / math.pi ** 2) * torch.pow(torch.atan(w2 / h2) - torch.atan(w1 / h1), 2)
+                    with torch.no_grad():
+                        alpha = v / (v - iou + (1 + eps))
+                    return iou - (rho2 / c2 + v * alpha)  # CIoU
+            else:  # GIoU https://arxiv.org/pdf/1902.09630.pdf
+                c_area = cw * ch + eps  # convex area
+                return iou - (c_area - union) / c_area  # GIoU
+        else:
+            return iou  # IoU
 
     def box_iou(self, box1, box2):
         # https://github.com/pytorch/vision/blob/master/torchvision/ops/boxes.py
@@ -274,6 +398,15 @@ class YoloLoss(nn.Module):
         # inter(N,M) = (rb(N,M,2) - lt(N,M,2)).clamp(0).prod(2)
         inter = (torch.min(box1[:, None, 2:], box2[:, 2:]) - torch.max(box1[:, None, :2], box2[:, :2])).clamp(0).prod(2)
         return inter / (area1[:, None] + area2 - inter)  # iou = inter / (area1 + area2 - inter)
+
+    def xywh2xyxy(self, x):
+        # Convert nx4 boxes from [x, y, w, h] to [x1, y1, x2, y2]
+        y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
+        y[:, 0] = x[:, 0] - x[:, 2] / 2  # top left x
+        y[:, 1] = x[:, 1] - x[:, 3] / 2  # top left y
+        y[:, 2] = x[:, 0] + x[:, 2] / 2  # bottom right x
+        y[:, 3] = x[:, 1] + x[:, 3] / 2  # bottom right y
+        return y
 
     # 匹配正样本
     def build_targets(self, predictions, targets, imgs):
@@ -404,7 +537,7 @@ class YoloLoss(nn.Module):
             # -------------------------------------------#
             #   gt_cls_per_image    种类的真实信息
             # -------------------------------------------#
-            gt_cls_per_image = F.one_hot(this_target[:, 1].to(torch.int64), self.num_classes).float().unsqueeze(
+            gt_cls_per_image = F.one_hot(this_target[:, 1].to(torch.int64), HP.num_classes).float().unsqueeze(
                 1).repeat(1, pxyxys.shape[0], 1)
 
             # -------------------------------------------#
